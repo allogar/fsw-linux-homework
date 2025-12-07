@@ -11,10 +11,13 @@
 #include <sys/socket.h>
 #include <pthread.h>
 #include <signal.h>
+#include <time.h>  // for nanosleep
 
 
 #define NUM_OF_THREADS  3
+#define DEFAULT_VALUE   "--"
 
+// State of each client TCP thread
 typedef struct {
     char last_value[4096];              // last value received from server TCP port
     pthread_mutex_t lock;               // thread mutex: concurrent access protection to last_value
@@ -29,6 +32,7 @@ typedef struct {
 // Global variables
 int g_sockets[NUM_OF_THREADS];              // one socket for each thread
 thread_state_t g_states[NUM_OF_THREADS];    // one state for each thread
+pthread_mutex_t g_snapshot_lock = PTHREAD_MUTEX_INITIALIZER;  // global mutex
 
 volatile sig_atomic_t g_stop_flag = 0;      // Stop signal
 
@@ -90,19 +94,15 @@ void *connection_thread(void *arg) {
     // Received value update loop
     while (!g_stop_flag && (n = read(sock, buffer, sizeof(buffer))) > 0) {
         // Safety storage of last received value
-        pthread_mutex_lock(&g_states[t->id].lock);
+        pthread_mutex_lock(&g_snapshot_lock); // Global lock
+        pthread_mutex_lock(&g_states[t->id].lock); // Thread lock
 
         size_t copy_len = (n < sizeof(g_states[t->id].last_value) - 1) ? n : sizeof(g_states[t->id].last_value) - 1;
         memcpy(g_states[t->id].last_value, buffer, copy_len);
         g_states[t->id].last_value[copy_len] = '\0';
 
         pthread_mutex_unlock(&g_states[t->id].lock);
-
-        if (write(STDOUT_FILENO, buffer, n) < 0) {
-            fprintf(stderr, "[Thread %d] Error when writing to stdout: %s\n", t->id, strerror(errno));
-            close(sock);
-            return NULL;
-        }
+        pthread_mutex_unlock(&g_snapshot_lock);
     }
 
      if (!g_stop_flag && n < 0) {
@@ -115,6 +115,54 @@ void *connection_thread(void *arg) {
     printf("[Thread %d] Finishing...\n", t->id);
 
     return NULL;
+}
+
+void main_loop_read_states(int num_ths) {
+    const long period_ns = 100 * 1000000L; // 1 ms = 1,000,000 ns
+    struct timespec ts_next;
+
+    // Using Fixed Absolute Schedule for accurate timing
+    // Initial time: first execution
+    clock_gettime(CLOCK_REALTIME, &ts_next);
+
+    while (!g_stop_flag) {
+        // Current loop timestamp (ms)
+        long long ms_since_epoch = ts_next.tv_sec * 1000LL + ts_next.tv_nsec / 1000000LL;
+        printf("[Main] %lld ms\n", ms_since_epoch);
+
+        pthread_mutex_lock(&g_snapshot_lock); // Global lock
+
+        for (int id = 0; id < num_ths; id++) {
+            char value_copy[4096];
+
+            pthread_mutex_lock(&g_states[id].lock); // Thread lock
+            
+            // Copy value
+            strncpy(value_copy, g_states[id].last_value, sizeof(value_copy));
+            value_copy[sizeof(value_copy)-1] = '\0';
+            
+            // Reset value
+            strncpy(g_states[id].last_value, DEFAULT_VALUE, sizeof(g_states[id].last_value));
+            g_states[id].last_value[sizeof(g_states[id].last_value)-1] = '\0';
+            
+            pthread_mutex_unlock(&g_states[id].lock);
+
+            printf("[Main] Thread %d value: %s\n", id, value_copy);
+        }
+
+        pthread_mutex_unlock(&g_snapshot_lock);
+
+        // Next execution time
+        ts_next.tv_nsec += period_ns;
+        // Normalize to avoid tv_nsec overflow
+        while (ts_next.tv_nsec >= 1000000000L) {
+            ts_next.tv_nsec -= 1000000000L;
+            ts_next.tv_sec++;
+        }
+
+        // Wait until next execution absolute time
+        clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &ts_next, NULL);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -139,7 +187,8 @@ int main(int argc, char *argv[]) {
     // Init thread states
     for (int i = 0; i < NUM_OF_THREADS; i++) {
         pthread_mutex_init(&g_states[i].lock, NULL);
-        g_states[i].last_value[0] = '\0';
+        strncpy(g_states[i].last_value, DEFAULT_VALUE, sizeof(g_states[i].last_value));
+        g_states[i].last_value[sizeof(g_states[i].last_value)-1] = '\0';
     }
 
     pthread_t threads[nthreads];
@@ -157,6 +206,9 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
+
+    // Main loop: read variables every 100 ms
+    main_loop_read_states(nthreads);
 
     // In case of CTRL-C: Wait for all threads to finish
     for (int i = 0; i < nthreads; i++) {
