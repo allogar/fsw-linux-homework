@@ -11,8 +11,12 @@ def load_data(filename):
 
     with open(filename, "r") as f:
         for line in f:
-            # Load JSON object
-            obj = json.loads(line)
+            # Try to load JSON object
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                # Línea no válida → ignorar
+                continue
 
             timestamps.append(obj["timestamp"])
 
