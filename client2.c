@@ -25,6 +25,14 @@
 #define READ_FIELDS     3
 #define WRITE_FIELDS    4
 
+#define OBJECT_OUT1                 0x0001
+#define PROPERTY_AMPLITUDE          0x00AA  // 170
+#define PROPERTY_FREQUENCY          0x00FF  // 255
+#define BEHAVIOR_1_FREQUENCY_MHZ    1000
+#define BEHAVIOR_1_AMPLITUDE        8000
+#define BEHAVIOR_2_FREQUENCY_MHZ    2000
+#define BEHAVIOR_2_AMPLITUDE        4000
+
 // State of each client TCP thread
 typedef struct {
     char last_value[MAX_VALUE_SIZE];    // last value received from server TCP port
@@ -38,10 +46,17 @@ typedef struct {
     int id;
 } thread_args_t;
 
+typedef enum {
+    SERVER_BEHAVIOR_UNDEFINED = 0,
+    SERVER_BEHAVIOR_1,                     // frequency of server output 1 to 1Hz, amplitude of server output 1 to 8000
+    SERVER_BEHAVIOR_2                      // frequency of server output 1 to 2Hz, amplitude of server output 1 to 4000
+} server_behavior_t;
+
 // Global variables
 int g_sockets[NUM_OF_THREADS];              // one socket for each thread
 thread_state_t g_states[NUM_OF_THREADS];    // one state for each thread
 pthread_mutex_t g_snapshot_lock = PTHREAD_MUTEX_INITIALIZER;  // global mutex
+server_behavior_t g_server_behavior = SERVER_BEHAVIOR_UNDEFINED;
 
 volatile sig_atomic_t g_stop_flag = 0;      // Stop signal
 
@@ -181,9 +196,43 @@ ssize_t build_write_command(uint8_t *out_buf, uint16_t object, uint16_t property
     return sizeof(fields);
 }
 
+void set_server_behavior(int sock, server_behavior_t server_behavior) {
+    uint8_t write_pkt[WRITE_FIELDS * sizeof(uint16_t)];
+
+    switch (server_behavior) {
+        case SERVER_BEHAVIOR_1:
+            // Set frequency of server output 1 to 1Hz
+            build_write_command(write_pkt, OBJECT_OUT1, PROPERTY_FREQUENCY, BEHAVIOR_1_FREQUENCY_MHZ);
+            send_udp_buffer(sock, SERVER_IP_ADDR, SERVER_UDP_PORT, write_pkt, sizeof(write_pkt));
+            // Set amplitude of server output 1 to 8000
+            build_write_command(write_pkt, OBJECT_OUT1, PROPERTY_AMPLITUDE, BEHAVIOR_1_AMPLITUDE);
+            send_udp_buffer(sock, SERVER_IP_ADDR, SERVER_UDP_PORT, write_pkt, sizeof(write_pkt));
+            break;
+        case SERVER_BEHAVIOR_2:
+            // Set frequency of server output 1 to 2Hz
+            build_write_command(write_pkt, OBJECT_OUT1, PROPERTY_FREQUENCY, BEHAVIOR_2_FREQUENCY_MHZ);
+            send_udp_buffer(sock, SERVER_IP_ADDR, SERVER_UDP_PORT, write_pkt, sizeof(write_pkt));
+            // Set amplitude of server output 1 to 4000
+            build_write_command(write_pkt, OBJECT_OUT1, PROPERTY_AMPLITUDE, BEHAVIOR_2_AMPLITUDE);
+            send_udp_buffer(sock, SERVER_IP_ADDR, SERVER_UDP_PORT, write_pkt, sizeof(write_pkt));
+            break;
+        default: 
+            break;
+    }
+
+    g_server_behavior = server_behavior;
+}
+
 void main_loop_output_values(int num_of_threads) {
     const long period_ns = PERIOD_MS * 1000000L; // 1 ms = 1,000,000 ns
     struct timespec ts_next;
+
+    // Create UDP socket
+    int udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_socket < 0) {
+        fprintf(stderr, "Error in UDP socket: %s\n", strerror(errno));
+        return;
+    }
 
     // Using Fixed Absolute Schedule for accurate timing
     // Initial time: first execution
@@ -220,6 +269,21 @@ void main_loop_output_values(int num_of_threads) {
         // Generate JSON with recovered values, and print to stdout
         produce_json_output(ms_since_epoch, values);
 
+        // Task 2: Update server behavior (output1 based on output3)
+        char *endptr;
+        double out3 = strtod(values[2], &endptr);
+        if (*endptr == '\0') {
+            // values[2] is a well formed float number string
+            //printf("[Main] out3 = %.1f\n", out3);
+
+            if (out3 >= 3.0 && g_server_behavior != SERVER_BEHAVIOR_1) { 
+                set_server_behavior(udp_socket, SERVER_BEHAVIOR_1);
+            
+            } else if (out3 < 3.0 && g_server_behavior != SERVER_BEHAVIOR_2) { 
+                set_server_behavior(udp_socket, SERVER_BEHAVIOR_2);
+            }
+        }
+
         // Next execution time
         ts_next.tv_nsec += period_ns;
         // Normalize to avoid tv_nsec overflow
@@ -231,6 +295,8 @@ void main_loop_output_values(int num_of_threads) {
         // Wait until next execution absolute time
         clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &ts_next, NULL);
     }
+
+    close(udp_socket);
 }
 
 int main(int argc, char *argv[]) {
@@ -263,29 +329,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // ************************************************************************
-    // Create UDP socket
-    int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp_sock < 0) {
-        fprintf(stderr, "Error in UDP socket: %s\n", strerror(errno));
-        return -1;
-    }
-
-    // Testing Server Control READ Messages
-    uint8_t read_pkt[READ_FIELDS * sizeof(uint16_t)];
-    //for (uint16_t obj = 0x0000; obj <= 0x000F; obj++) {
-        for (uint16_t prop = 0x0000; prop <= 0x0FFF; prop++) {
-            build_read_command(read_pkt, 0x0001, prop);
-            send_udp_buffer(udp_sock, SERVER_IP_ADDR, SERVER_UDP_PORT, read_pkt, sizeof(read_pkt));
-            //printf("Comando READ enviado\n");
-        }
-    //}
-
-    close(udp_sock);
-    // ************************************************************************
-
     // Main loop: Get values and write to stdout every 100 ms
-    //main_loop_output_values(nthreads);
+    main_loop_output_values(nthreads);
 
     // In case of CTRL-C: Wait for all threads to finish
     for (int i = 0; i < nthreads; i++) {
