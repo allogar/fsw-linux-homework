@@ -83,31 +83,33 @@ With this information, I can conclude that:
 - So, to get some info about the message fields 'object', 'property' and 'value', a first step that I have done is sending a burst of read control messages to the server, and analyze the server output:
 
     * First burst: fixing 'property' value to 0x0000, and iterate 'object' from 0x0000 to 0xFFFF. Server ouput is:
-
-        ...
-        No such object: 0
-        1.0: no such property
-        2.0: no such property
-        3.0: no such property
-        No such object: 4
-        ...
+    ```
+    ...
+    No such object: 0
+    1.0: no such property
+    2.0: no such property
+    3.0: no such property
+    No such object: 4
+    ...
+    ```
 
     Only 'object' values 0x0001, 0x0002 and 0x0003 are acknowledged to be valid. We infere they correspond to TCP data streams out1, out2 and out3.
 
     * Second burst: fixing 'object' value to 0x0001 (out1), and iterate 'property' from 0x0000 to 0xFFFF. Server ouput is:
-
-        ...
-        1.13: no such property
-        1.14: enabled=1
-        1.15: no such property
-        ...
-        1.169: no such property
-        1.170: amplitude=5000
-        1.171: no such property
-        ...
-        1.254: no such property
-        1.255: frequency=500
-        ...
+    ```
+    ...
+    1.13: no such property
+    1.14: enabled=1
+    1.15: no such property
+    ...
+    1.169: no such property
+    1.170: amplitude=5000
+    1.171: no such property
+    ...
+    1.254: no such property
+    1.255: frequency=500
+    ...
+    ```
 
     We discover that: 
         - 'property' 14 (0x000E) is 'enabled'. Current value is 1 (On?)
@@ -170,6 +172,6 @@ Even though I don't know the exact behavior of the server, I have reasonable ass
 
 2. There are no blocking issues on the reception. My main thread always wakes up at regular intervals and displays consistent timestamps and numerical data to the standard output as a JSON object.
 
-3. Control protocol's read and write messages cause a consistent change in the server's signals behavior, together with the corresponding feedback on the server's standard output.
+3. Control protocol's read and write messages cause a consistent change in the server's signals behavior (see `graph_clien2.png`), together with the corresponding feedback on the server's standard output.
 
 To be absolutely certain that my programs are working correctly, I should use a test server that generates well-known patterns, and check that my program receives and prints them exactly as they are. Moreover, it would also be necessary to check for boundary conditions, such as: zero bytes received, server shutdowns, very large messages, very fast messages, non-printable values, etc.
